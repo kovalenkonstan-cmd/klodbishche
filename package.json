@@ -1,0 +1,14 @@
+{
+  "name": "vibe-graveyard",
+  "productName": "Кладбище проектов",
+  "version": "0.1.0",
+  "description": "Desktop graveyard for abandoned vibe-coding projects",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

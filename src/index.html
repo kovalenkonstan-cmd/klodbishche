@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:" />
+  <title>Клодбище</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="card" id="card">
+    <header class="bar">
+      <span class="logo-slot"></span>
+      <h1 class="title" id="title">Клодбище</h1>
+      <div class="actions">
+        <button id="addBtn" class="px-btn" title="Похоронить проект">+</button>
+        <button id="closeBtn" class="px-btn" title="Свернуть (Esc)">X</button>
+      </div>
+    </header>
+
+    <div class="scene" id="scene">
+      <canvas id="art" class="art" width="108" height="90"></canvas>
+      <canvas id="fx" class="art fx" width="108" height="90"></canvas>
+      <div class="labels" id="labels"></div>
+      <div class="feeder" id="feeder" title="Покормить крабиков"></div>
+      <span class="pager" id="pager">
+        <button id="prevBtn" class="px-btn" title="Назад">&lt;</button>
+        <span id="pageNum"></span>
+        <button id="nextBtn" class="px-btn" title="Дальше">&gt;</button>
+      </span>
+    </div>
+  </div>
+
+  <!-- Lives outside the card so it stays put when the card folds away -->
+  <button class="logo" id="logo" title="Клик — свернуть или развернуть, тяни — переместить">
+    <canvas id="logoArt" width="11" height="13"></canvas>
+  </button>
+
+  <dialog id="editDlg">
+    <form method="dialog" id="editForm">
+      <p class="meta" id="editMeta"></p>
+      <label>Название
+        <input name="name" maxlength="40" required />
+      </label>
+      <label>Эпитафия
+        <input name="epitaph" maxlength="80" placeholder="Что о нём сказать напоследок" />
+      </label>
+      <label>Причина смерти
+        <select name="cause"></select>
+      </label>
+      <div class="dlg-actions">
+        <button type="button" id="dropBtn" class="link"></button>
+        <span class="spacer"></span>
+        <button value="cancel" class="btn ghost" formnovalidate>Отмена</button>
+        <button value="save" class="btn">Сохранить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="addDlg">
+    <form method="dialog" id="addForm">
+      <h2>Похоронить проект</h2>
+      <label>Название
+        <input name="name" maxlength="40" required placeholder="Мой гениальный стартап" />
+      </label>
+      <label>Эпитафия
+        <input name="epitaph" maxlength="80" placeholder="Коротко, что это было" />
+      </label>
+      <div class="two">
+        <label>Когда родился
+          <input name="born" type="date" required />
+        </label>
+        <label>Причина смерти
+          <select name="cause"></select>
+        </label>
+      </div>
+      <div class="dlg-actions">
+        <span class="spacer"></span>
+        <button value="cancel" class="btn ghost" formnovalidate>Отмена</button>
+        <button value="save" class="btn">Закопать</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
