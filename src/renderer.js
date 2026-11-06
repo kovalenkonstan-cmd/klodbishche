@@ -437,7 +437,11 @@ function render(data) {
   labels.replaceChildren();
 
   if (!graves.length) {
-    labels.append(place(el('div', 'name', 'Все живы. Пока.'), 0, 60));
+    const msg = data.found
+      ? 'Все живы. Пока.'
+      : 'Не нашёл проектов в истории Claude.\nДобавь папку через 🪦 в строке меню.';
+    labels.append(place(el('div', 'name', msg), 0, 58));
+    labels.lastChild.style.whiteSpace = 'pre-line';
     labels.lastChild.style.width = '324px';
     return;
   }

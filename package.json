@@ -1,14 +1,50 @@
 {
   "name": "vibe-graveyard",
-  "productName": "Кладбище проектов",
-  "version": "0.1.0",
-  "description": "Desktop graveyard for abandoned vibe-coding projects",
+  "productName": "Клодбище",
+  "version": "1.0.0",
+  "description": "Пиксельное кладбище заброшенных вайбкодерских проектов из истории Claude",
   "main": "src/main.js",
   "private": true,
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "dist": "electron-builder --mac dmg --universal"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "author": "Konstantin Kovalenko",
+  "build": {
+    "appId": "com.kovalenko.klodbishche",
+    "productName": "Клодбище",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.png",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Клодбище",
+      "artifactName": "Klodbishche-${version}.dmg"
+    },
+    "afterPack": "scripts/adhoc-sign.js"
   }
 }

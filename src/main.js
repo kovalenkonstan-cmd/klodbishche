@@ -1,42 +1,30 @@
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, globalShortcut, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const { constants: FS } = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const { findProjects, projectContext } = require('./projects');
 
-// Where vibe-coding projects live: every subfolder is one project.
-const PROJECTS_DIR = path.join(os.homedir(), 'Claude');
-// Claude Code keeps notes and chat logs for that folder here.
-const CLAUDE_PROJECT_DIR = path.join(os.homedir(), '.claude', 'projects', PROJECTS_DIR.replace(/[\/.]/g, '-'));
-// A project with no file changes for this long is considered dead.
+// A project with no file changes and no Claude chats for this long is considered dead.
 const DEAD_AFTER_DAYS = 30;
 const DAY = 24 * 60 * 60 * 1000;
-
-// Folders that change on their own and say nothing about real work.
-const SKIP_DIRS = new Set([
-  'node_modules', '.git', '.next', 'dist', 'build', 'out', 'target',
-  '.venv', 'venv', '__pycache__', '.cache', '.turbo', '.vercel', '.claude',
-]);
-// Finder touches .DS_Store just by opening a folder.
-const SKIP_FILES = new Set(['.DS_Store']);
+const HOME = os.homedir();
 
 let storePath;
 
 // ---------- store ----------
+function emptyStore() {
+  return { overrides: {}, manual: [], names: {}, nameFail: {}, ui: {} };
+}
+
 async function loadStore() {
   try {
     const s = JSON.parse(await fs.readFile(storePath, 'utf8'));
-    return {
-      overrides: s.overrides || {},
-      manual: s.manual || [],
-      names: s.names || {},
-      nameFail: s.nameFail || {},
-      ui: s.ui || {},
-    };
+    return { ...emptyStore(), ...s, ui: s.ui || {} };
   } catch {
-    return { overrides: {}, manual: [], names: {}, nameFail: {}, ui: {} };
+    return emptyStore();
   }
 }
 
@@ -45,60 +33,37 @@ async function saveStore(store) {
   await fs.writeFile(storePath, JSON.stringify(store, null, 2));
 }
 
-// ---------- scanning ----------
-async function walk(dir, acc) {
-  let entries;
+// Early versions kept data under another app name and keyed graves by folder name inside ~/Claude.
+async function migrateStore() {
+  const oldPath = path.join(app.getPath('appData'), 'Кладбище проектов', 'graveyard.json');
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    await fs.access(storePath);
   } catch {
-    return;
+    try {
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      await fs.copyFile(oldPath, storePath);
+    } catch {}
   }
-  for (const e of entries) {
-    if (e.isSymbolicLink()) continue;
-    const p = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      if (!SKIP_DIRS.has(e.name)) await walk(p, acc);
-    } else if (e.isFile() && !SKIP_FILES.has(e.name)) {
-      try {
-        const st = await fs.stat(p);
-        acc.files++;
-        if (st.mtimeMs > acc.last) acc.last = st.mtimeMs;
-        const born = Math.min(st.birthtimeMs || Infinity, st.mtimeMs);
-        if (born > 0 && born < acc.born) acc.born = born;
-      } catch {
-        // file vanished mid-scan, ignore
-      }
+  const store = await loadStore();
+  let changed = false;
+  for (const key of ['overrides', 'names', 'nameFail']) {
+    for (const id of Object.keys(store[key])) {
+      if (!id.startsWith('dir:')) continue;
+      const next = 'path:' + path.join(HOME, 'Claude', id.slice(4));
+      if (!(next in store[key])) store[key][next] = store[key][id];
+      delete store[key][id];
+      changed = true;
     }
   }
+  if (changed) await saveStore(store);
 }
 
-async function scanProjects() {
-  let entries = [];
-  try {
-    entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const projects = [];
-  for (const e of entries) {
-    if (!e.isDirectory() || e.name.startsWith('.')) continue;
-    const acc = { files: 0, last: 0, born: Infinity };
-    const dir = path.join(PROJECTS_DIR, e.name);
-    await walk(dir, acc);
-    if (acc.files === 0) continue;
-    // Prefer the folder's own creation date: copied-in files keep old dates.
-    try {
-      const st = await fs.stat(dir);
-      if (st.birthtimeMs > 0) acc.born = Math.min(st.birthtimeMs, acc.last);
-    } catch {}
-    projects.push({ name: e.name, born: acc.born, last: acc.last });
-  }
-  return projects;
-}
+// ---------- graves ----------
+const tilde = (p) => (p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p);
 
 async function getGraves() {
   const store = await loadStore();
-  const projects = await scanProjects();
+  const projects = await findProjects(store.ui.roots || []);
   const now = Date.now();
 
   let alive = 0;
@@ -106,14 +71,15 @@ async function getGraves() {
   const graves = [];
 
   for (const p of projects) {
-    const id = 'dir:' + p.name;
+    const id = 'path:' + p.path;
     const o = store.overrides[id] || {};
     if (o.hidden) { hidden++; continue; }
     if (now - p.last < DEAD_AFTER_DAYS * DAY) { alive++; continue; }
     graves.push({
       id,
       auto: true,
-      folder: p.name,
+      path: p.path,
+      folder: tilde(p.path),
       name: o.name || (store.names[id] && store.names[id].name) || p.name,
       named: Boolean(o.name || store.names[id]),
       born: p.born,
@@ -126,97 +92,43 @@ async function getGraves() {
 
   graves.sort((a, b) => b.died - a.died);
   scheduleNaming(graves, store);
-  return { graves, alive, hidden, deadAfterDays: DEAD_AFTER_DAYS };
+  return { graves, alive, hidden, found: projects.length, deadAfterDays: DEAD_AFTER_DAYS };
 }
 
 // ---------- human names from Claude ----------
 // Uses the local `claude` command (the user's own Claude Code login), no API key in the app.
-const CLAUDE_BINS = [
-  path.join(os.homedir(), '.local/bin/claude'),
-  '/opt/homebrew/bin/claude',
-  '/usr/local/bin/claude',
-  path.join(os.homedir(), '.claude/local/claude'),
-];
 const NAME_PROMPT =
   'Ниже заметки и переписка о заброшенном вайбкодерском проекте. ' +
   'Придумай для него короткое человеческое название на русском, как будто так его зовут друзья: ' +
   'максимум 3 слова, без кавычек и точки, не повторяй техническое имя папки. Ответь только названием.';
+// Apps opened from Finder don't get the shell's PATH, so look in the usual places too.
+const EXTRA_PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.local/bin'), path.join(HOME, '.npm-global/bin'), path.join(HOME, '.bun/bin')];
+const CLAUDE_BINS = [...EXTRA_PATH.map((d) => path.join(d, 'claude')), path.join(HOME, '.claude/local/claude')];
 let naming = false;
+let claudeBin;
 
 async function findClaude() {
+  if (claudeBin !== undefined) return claudeBin;
   for (const p of CLAUDE_BINS) {
     try {
       await fs.access(p, FS.X_OK);
-      return p;
+      return (claudeBin = p);
     } catch {}
   }
-  return null;
-}
-
-async function readHead(file, max) {
-  try {
-    return (await fs.readFile(file, 'utf8')).slice(0, max);
-  } catch {
-    return '';
-  }
-}
-
-function userTexts(jsonl, limit) {
-  const out = [];
-  for (const line of jsonl.split('\n')) {
-    if (out.length >= limit) break;
-    if (!line.includes('"type":"user"')) continue;
-    try {
-      const m = JSON.parse(line).message;
-      let t = typeof m.content === 'string' ? m.content
-        : (m.content || []).filter((c) => c.type === 'text').map((c) => c.text).join(' ');
-      t = t.replace(/<[^>]+>[\s\S]*?<\/[^>]+>/g, '').trim();
-      if (t.length > 15) out.push(t.slice(0, 300));
-    } catch {}
-  }
-  return out;
-}
-
-async function projectContext(folder) {
-  const parts = [`Папка: ${folder}`];
-  const dir = path.join(PROJECTS_DIR, folder);
-  for (const f of ['CLAUDE.md', 'README.md']) {
-    const t = await readHead(path.join(dir, f), 1200);
-    if (t) parts.push(`${f}:\n${t}`);
-  }
-  try {
-    const pkg = JSON.parse(await readHead(path.join(dir, 'package.json'), 20000));
-    if (pkg.description) parts.push(`Описание: ${pkg.description}`);
-  } catch {}
-
-  // Claude's memory notes that mention this folder
-  try {
-    const memDir = path.join(CLAUDE_PROJECT_DIR, 'memory');
-    for (const f of await fs.readdir(memDir)) {
-      if (!f.endsWith('.md') || f === 'MEMORY.md') continue;
-      const t = await readHead(path.join(memDir, f), 4000);
-      if (t.includes(`/${folder}`)) parts.push(`Заметка:\n${t.slice(0, 1200)}`);
-    }
-  } catch {}
-
-  // First requests from chats that touched this folder
-  try {
-    const chats = [];
-    for (const f of await fs.readdir(CLAUDE_PROJECT_DIR)) {
-      if (!f.endsWith('.jsonl')) continue;
-      const t = await readHead(path.join(CLAUDE_PROJECT_DIR, f), 5_000_000);
-      if (t.includes(`/Claude/${folder}`)) chats.push(...userTexts(t, 3));
-      if (chats.length >= 6) break;
-    }
-    if (chats.length) parts.push('Из переписки:\n' + chats.slice(0, 6).join('\n'));
-  } catch {}
-
-  return parts.join('\n\n').slice(0, 6000);
+  // last resort: ask the user's login shell
+  claudeBin = await new Promise((resolve) => {
+    execFile('/bin/zsh', ['-lc', 'command -v claude'], { timeout: 5000 }, (err, out) => {
+      const p = String(out || '').trim().split('\n').pop();
+      resolve(!err && p.startsWith('/') ? p : null);
+    });
+  });
+  return claudeBin;
 }
 
 function askClaude(bin, input) {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, ['-p', '--model', 'haiku', NAME_PROMPT], { cwd: os.tmpdir() });
+    const env = { ...process.env, PATH: [process.env.PATH, ...EXTRA_PATH].filter(Boolean).join(':') };
+    const child = spawn(bin, ['-p', '--model', 'haiku', NAME_PROMPT], { cwd: os.tmpdir(), env });
     let out = '';
     let err = '';
     const timer = setTimeout(() => child.kill(), 120000);
@@ -247,8 +159,8 @@ async function scheduleNaming(graves, store) {
   try {
     for (const g of todo) {
       try {
-        const name = cleanName(await askClaude(bin, await projectContext(g.folder)));
-        if (!name) throw new Error('empty name');
+        const name = cleanName(await askClaude(bin, await projectContext(g.path)));
+        if (!name || /not logged|login|authenticat/i.test(name)) throw new Error('no usable name');
         const s = await loadStore();
         s.names[g.id] = { name, at: Date.now() };
         await saveStore(s);
@@ -283,7 +195,7 @@ ipcMain.handle('grave:update', async (_e, id, patch) => {
     if (name) manual.name = name;
   } else {
     const o = { ...(store.overrides[id] || {}), ...clean };
-    const auto = store.names[id] ? store.names[id].name : id.replace(/^dir:/, '');
+    const auto = store.names[id] ? store.names[id].name : path.basename(id.replace(/^path:/, ''));
     if (name && name !== auto) o.name = name;
     else delete o.name;
     store.overrides[id] = o;
@@ -419,16 +331,39 @@ function createWindow() {
   win.on('closed', () => { win = null; });
 }
 
+async function addProjectsFolder() {
+  const r = await dialog.showOpenDialog({
+    title: 'Папка, где лежат твои проекты',
+    buttonLabel: 'Выбрать',
+    properties: ['openDirectory'],
+  });
+  if (r.canceled || !r.filePaths[0]) return;
+  const store = await loadStore();
+  store.ui.roots = [...new Set([...(store.ui.roots || []), r.filePaths[0]])];
+  await saveStore(store);
+  refreshAll();
+}
+
 function updateTray() {
   if (!tray) return;
-  tray.setContextMenu(Menu.buildFromTemplate([
+  const items = [
     { label: collapsed ? 'Развернуть' : 'Свернуть', accelerator: 'CommandOrControl+Alt+G', click: () => setCollapsed(!collapsed) },
     { label: 'Похоронить проект…', click: () => { setCollapsed(false); win && win.webContents.send('open-add'); } },
+    { label: 'Добавить папку с проектами…', click: () => addProjectsFolder() },
     { label: 'Обновить', click: () => refreshAll() },
     { label: 'Вернуть скрытые', click: async () => { await unhideAll(); refreshAll(); } },
     { type: 'separator' },
-    { label: 'Выйти', click: () => app.quit() },
-  ]));
+  ];
+  if (app.isPackaged) {
+    items.push({
+      label: 'Запускать при входе',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+    });
+  }
+  items.push({ label: 'Выйти', click: () => app.quit() });
+  tray.setContextMenu(Menu.buildFromTemplate(items));
 }
 
 function createTray() {
@@ -445,6 +380,7 @@ async function snapshot(file) {
 
 app.whenReady().then(async () => {
   storePath = path.join(app.getPath('userData'), 'graveyard.json');
+  await migrateStore();
   const saved = (await loadStore()).ui.pos;
   if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) homePos = saved;
   createWindow();
@@ -457,7 +393,7 @@ app.whenReady().then(async () => {
   if (shot) {
     const later = (ms) => new Promise((r) => setTimeout(r, ms));
     (async () => {
-      await later(3000);
+      await later(4000);
       await snapshot(shot);
       await win.webContents.executeJavaScript('feedAt(15)');
       await later(4000);
